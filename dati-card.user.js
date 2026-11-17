@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.7.4
+// @version      0.8.0
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -51,7 +51,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.7.4';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.0';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -4359,8 +4359,37 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     return option.matches(selector) || Boolean(option.querySelector(selector));
   }
 
+  function parseAnswerKey(input) {
+    const text = input.normalize('NFKC').trim().toUpperCase();
+    const compact = text.replace(/[\s,，、;；]+/g, '');
+    if (/^[A-D]{1,140}$/.test(compact)) return [...compact];
+    const answers = [];
+    const pattern = /(?:^|[\s,，、;；])(?:第\s*)?(\d{1,3})\s*(?:题\s*)?[.、:=：,]?\s*([A-D])(?=$|[\s,，、;；])/g;
+    if (text.replace(pattern, '').replace(/[\s,，、;；]+/g, '')) {
+      throw new Error('标准答案含有无法读取的文字或选项。');
+    }
+    for (const match of text.matchAll(pattern)) {
+      const number = Number(match[1]);
+      if (number < 1 || number > 140 || answers[number - 1]) throw new Error('答案题号超出范围或重复。');
+      answers[number - 1] = match[2];
+    }
+    if (!answers.length || Array.from(answers).some(answer => !answer)) {
+      throw new Error('标准答案须从第 1 题连续编号，或粘贴完整的 A–D 序列。');
+    }
+    return answers;
+  }
+
+  function gradeAnswers(results, answers) {
+    return answers.map((correct, i) => {
+      const result = results[i];
+      const state = result.state === '待核对' ? '待核对'
+        : !result.answer ? '未答' : result.answer === correct ? '正确' : '错误';
+      return { correct, state };
+    });
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { recognize, findCorners, collect, isSelected, fenbiExerciseRules };
+    module.exports = { recognize, findCorners, collect, isSelected, fenbiExerciseRules, parseAnswerKey, gradeAnswers };
     return;
   }
 
@@ -4409,7 +4438,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.7.4';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.0';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
@@ -4520,6 +4549,12 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
           border-radius: 5px; background: #eff6ff; font-variant-numeric: tabular-nums }
         .grid label[data-state="待核对"] { background: #ffe6ae }
         .grid label[data-state="空白"] { background: #f1f5f9 }
+        .grid label[data-grade="错误"] { background: #ffe7e7 }
+        .grid label[data-grade="正确"] { background: #dcfce7 }
+        .grid label:has(.answer-mark) { flex-wrap: wrap; }
+        .answer-mark { flex-basis: 100%; font-size: 11px; }
+        #local-grade { margin: 10px 0; }
+        #grade-results { white-space: pre-wrap; max-height: 18vh; overflow:auto; }
         #count { width: 65px }
         textarea { width: 95%; min-height: 7em }
         footer { margin-top: 14px }
@@ -4527,13 +4562,21 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         #status { color: #475569; font-size: 12px }
       </style>
       <section aria-label="涂卡录入">
+        <label>使用方式 <select id="scan-mode"><option value="fenbi">粉笔录入</option><option value="local">本地对答案</option></select></label>
+        <div id="local-grade" hidden>
+          <label>标准答案 <textarea id="answer-key" placeholder="粘贴 A B C D… 或 1.A 2.B 3.C…"></textarea></label>
+          <label>导入答案文件 <input id="answer-file" type="file" accept=".txt,.json,.csv,text/plain,application/json"></label>
+          <label id="answer-set-label" hidden>选择试卷 <select id="answer-set"></select></label>
+          <button id="grade-button" type="button" disabled>对答案</button>
+          <p id="grade-results" role="status" hidden></p>
+        </div>
         <p class="controls"><label class="upload">答题卡图片 <input id="file" type="file" accept="image/*"></label>
           <button class="after-upload" id="align" disabled>标定答题区</button>
           <label class="after-upload">试卷题量 <input id="count" type="number" min="1" max="140" value="140"></label></p>
         <p id="status" role="status">选择与样图同版式的 JPG 或 PNG。</p>
         <main><div><canvas hidden></canvas></div><div>
           <p id="summary"></p><div class="grid"></div>
-          <details><summary>网页定位规则</summary><p>依次填写题目容器、题号、选项、选中状态的 CSS 选择器。</p>
+          <details id="page-rules"><summary>网页定位规则</summary><p>依次填写题目容器、题号、选项、选中状态的 CSS 选择器。</p>
             <textarea id="rules" aria-label="网页定位规则"></textarea></details>
         </div></main>
         <footer><button id="copy" disabled>复制答案</button><button id="check" disabled>检查网页</button>
@@ -4556,6 +4599,83 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     get('rules').value = isFenbiExercise && savedRules === legacyRules ? defaultRules : savedRules;
     let base, results = [], corners = null, pending = null, busy = false;
     let generation = 0;
+    let graded = [];
+    let answerSets = [];
+    get('scan-mode').value = isFenbiExercise ? 'fenbi' : 'local';
+
+    function showMode() {
+      const local = get('scan-mode').value === 'local';
+      for (const id of ['check', 'trial', 'fill', 'page-rules']) get(id).hidden = local;
+      get('local-grade').hidden = !local;
+      clearGrade();
+      updateButtons();
+    }
+
+    function clearGrade() {
+      graded = [];
+      get('grade-results').hidden = true;
+      for (const label of grid.children) {
+        delete label.dataset.grade;
+        label.querySelector('.answer-mark')?.remove();
+      }
+    }
+
+    function useAnswerSet() {
+      const set = answerSets[get('answer-set').selectedIndex];
+      if (!set) return;
+      get('answer-key').value = set.answers;
+      get('count').value = parseAnswerKey(set.answers).length;
+      clearGrade();
+      if (results.length) render();
+    }
+
+    get('scan-mode').onchange = showMode;
+    get('answer-key').oninput = clearGrade;
+    get('answer-set').onchange = useAnswerSet;
+    get('answer-file').onchange = async () => {
+      const file = get('answer-file').files[0];
+      if (!file) return;
+      try {
+        const contents = await file.text();
+        if (get('answer-file').files[0] !== file) return;
+        const sets = /\.json$/i.test(file.name) ? JSON.parse(contents).sets
+          : [{ title: file.name, answers: contents }];
+        if (!Array.isArray(sets) || !sets.length) throw new Error('答案库没有试卷。');
+        for (const set of sets) parseAnswerKey(set.answers);
+        answerSets = sets;
+        get('answer-set').replaceChildren(...sets.map(set => new Option(set.title)));
+        get('answer-set-label').hidden = sets.length === 1;
+        useAnswerSet();
+        status('已读取标准答案。');
+      } catch (error) {
+        status('答案文件读取失败。' + error.message);
+      }
+    };
+    get('grade-button').onclick = () => {
+      try {
+        const answers = parseAnswerKey(get('answer-key').value);
+        if (answers.length !== count()) throw new Error('标准答案有 ' + answers.length + ' 题，试卷题量为 ' + count() + '。');
+        clearGrade();
+        graded = gradeAnswers(results, answers);
+        const totals = Object.fromEntries(['正确', '错误', '未答', '待核对'].map(state =>
+          [state, graded.filter(item => item.state === state).length]));
+        const review = graded.flatMap(({ correct, state }, i) => state === '正确' ? [] :
+          [(i + 1) + ' ' + state + ' · 标准 ' + correct + ' · 作答 ' + (results[i].answer || '—')]);
+        const output = get('grade-results');
+        output.textContent = Object.entries(totals).map(([state, total]) => state + ' ' + total).join(' · ') +
+          ' / ' + answers.length + (review.length ? '\n' + review.join('\n') : '');
+        output.hidden = false;
+        graded.forEach(({ correct, state }, i) => {
+          const label = grid.children[i];
+          label.dataset.grade = state;
+          if (state === '正确') return;
+          const mark = document.createElement('span');
+          mark.className = 'answer-mark';
+          mark.textContent = '✓' + correct;
+          label.append(mark);
+        });
+      } catch (error) { status(error.message); }
+    };
 
     function count() {
       const size = get('count').valueAsNumber;
@@ -4567,6 +4687,8 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
       for (const id of ['copy', 'check', 'trial', 'fill']) get(id).disabled = busy || Boolean(pending) || !results.length;
       for (const id of ['file', 'count', 'rules']) get(id).disabled = busy;
       get('align').disabled = busy || !base;
+      get('grade-button').disabled = busy || Boolean(pending) || !results.length;
+      get('scan-mode').disabled = busy;
     }
 
     function paint() {
@@ -4611,6 +4733,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
           result.answer = select.value;
           result.state = select.value ? '已校对' : '空白';
           label.dataset.state = result.state;
+          clearGrade();
           paint();
           summarize();
         });
@@ -4622,6 +4745,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     }
 
     function scan() {
+      clearGrade();
       results = [];
       try {
         count();
@@ -4643,6 +4767,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     get('file').addEventListener('change', async () => {
       const file = get('file').files[0];
       if (!file) return;
+      clearGrade();
       const current = ++generation;
       results = [];
       base = null;
@@ -4697,6 +4822,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     };
 
     get('count').onchange = () => {
+      clearGrade();
       try {
         count();
         if (base && !results.length && !pending) scan();
@@ -4775,6 +4901,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     get('trial').onclick = () => importAnswers(3);
     get('fill').onclick = () => importAnswers(Infinity);
     panel.append(host);
+    showMode();
     selectView(true);
   }
 
