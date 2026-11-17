@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.7.3
+// @version      0.7.4
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -13,6 +13,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
 // @noframes
 // ==/UserScript==
 
@@ -50,7 +51,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.7.3';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.7.4';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -371,14 +372,8 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     const guangdongTitleTimer = setInterval(syncGuangdongControl, 1000);
     document.getElementById('tm-find-essay-source').onclick = () => {
         const question = document.querySelector('.questions-objective-container app-ti, .tis-container app-ti, app-ti');
-        const prompt = question?.querySelector('.ti-content')?.textContent || question?.textContent || '';
-        const quoted = [...prompt.matchAll(/[“「《]([^”」》]{3,45})[”」》]/g)]
-            .map(match => match[1]).filter(text => !/^(给定)?(资料|材料)/.test(text));
-        const query = quoted[0] || essayStemKey(prompt).slice(0, 28);
-        if (!query) return;
-        const url = new URL('https://www.fenbi.com/spa/tiku/guide/question/search');
-        url.search = new URLSearchParams({ q: query, courseSet: 'shenlun', course: 'shenlun', qType: '1' });
-        window.open(url.href, '_blank', 'noopener');
+        const url = essaySearchUrl(question);
+        if (url) window.open(url, '_blank', 'noopener');
     };
     // Wait until the source storage key has been initialized before the initial read.
     setTimeout(syncEssayTitle, 0);
@@ -2049,6 +2044,46 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         return essayPrintHeader([...titles, document.title], prompts);
     }
 
+    function essaySearchUrl(question) {
+        const prompt = question?.querySelector('.ti-content')?.textContent || question?.textContent || '';
+        const quoted = [...prompt.matchAll(/[“「《]([^”」》]{3,45})[”」》]/g)]
+            .map(match => match[1]).filter(text => !/^(给定)?(资料|材料)/.test(text));
+        const query = quoted[0] || essayStemKey(prompt).replace(/^根据给定资料/, '').slice(0, 28);
+        if (query.length < 3) return '';
+        const url = new URL('https://www.fenbi.com/spa/tiku/guide/question/search');
+        url.search = new URLSearchParams({ q: query, courseSet: 'shenlun', course: 'shenlun', qType: '1' });
+        return url.href;
+    }
+
+    let lastEssayLookup;
+    function lookupEssaySource(question) {
+        const prompt = question.querySelector('.ti-content')?.textContent || question.textContent;
+        const key = location.pathname + '|' + essayStemKey(prompt);
+        if (lastEssayLookup?.key === key) return lastEssayLookup.done;
+        const url = essaySearchUrl(question);
+        if (!url || typeof GM_openInTab !== 'function') return Promise.resolve();
+        let tab;
+        try { tab = GM_openInTab(url, { active: false, insert: true }); } catch (_) {
+            lastEssayLookup = { key, done: Promise.resolve(), pending: false };
+            return lastEssayLookup.done;
+        }
+        const lookup = { key, pending: true };
+        lookup.done = new Promise(resolve => {
+            const deadline = Date.now() + 14000;
+            const timer = setInterval(() => {
+                if (!sourceFromSearch(prompt, GM_getValue(essaySourceIndexKey, {})) &&
+                    !tab?.closed && Date.now() < deadline &&
+                    key.startsWith(location.pathname + '|')) return;
+                clearInterval(timer);
+                lookup.pending = false;
+                tab?.close();
+                resolve();
+            }, 400);
+        });
+        lastEssayLookup = lookup;
+        return lookup.done;
+    }
+
     function syncEssayTitle() {
         const title = document.getElementById('tm-coverTitle');
         const isShenlun = new URL(location.href).searchParams.get('routecs') === 'shenlun';
@@ -2063,8 +2098,12 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         if (!questions.length) return;
         const titleQuestions = tabs.length > 1 ? [] : questions;
         const nextTitle = essayTitleForQuestions(titleQuestions);
-        if (title.value !== nextTitle) title.value = nextTitle;
-        lookup.hidden = !nextTitle.startsWith('出处未识别') || titleQuestions.length !== 1;
+        const missing = nextTitle.startsWith('出处未识别') && titleQuestions.length === 1;
+        if (missing) lookupEssaySource(titleQuestions[0]);
+        const searching = missing && lastEssayLookup?.pending;
+        const displayTitle = searching ? nextTitle.replace('出处未识别', '正在查询出处') : nextTitle;
+        if (title.value !== displayTitle) title.value = displayTitle;
+        lookup.hidden = !missing || searching;
     }
 
     function essayAnswerRow(row, limit, isExtra) {
@@ -2797,7 +2836,12 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         const essayQuestions = isShenlun ? Array.from(elements).filter(node => node.matches('app-ti')) : [];
         const essayPrompt = question => question.querySelector('.ti-content')?.textContent || question.textContent;
         if (essayQuestions.length === 1) shenlunContinuous = true;
-        const essayHeader = essayQuestions.length ? essayTitleForQuestions(essayQuestions) : '';
+        let essayHeader = essayQuestions.length ? essayTitleForQuestions(essayQuestions) : '';
+        if (essayQuestions.length === 1 && essayHeader.startsWith('出处未识别')) {
+            updatePrintProgress(reservedWin, '正在查询申论出处', '在粉笔题库匹配这道题…');
+            await lookupEssaySource(essayQuestions[0]);
+            essayHeader = essayTitleForQuestions(essayQuestions);
+        }
         if (essayHeader) {
             coverTitle = essayHeader;
             document.getElementById('tm-coverTitle').value = essayHeader;
@@ -4365,7 +4409,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.7.3';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.7.4';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
