@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.8.5
+// @version      0.8.6
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -873,8 +873,20 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     answerModeButton.textContent = '答题模式';
     const isShenlunPage = () => new URL(location.href).searchParams.get('routecs') === 'shenlun'
         && /^\/ti\/view\/paper(?:\/|$)/.test(location.pathname);
-    const syncAnswerModeButton = () => { answerModeButton.hidden = !isShenlunPage(); };
-    panel.after(answerModeButton);
+    const practicesButton = document.createElement('button');
+    practicesButton.type = 'button';
+    practicesButton.className = 'dati-launcher';
+    practicesButton.style.top = '208px';
+    practicesButton.textContent = '我的练习';
+    practicesButton.onclick = () => {
+        window.open('https://ccav1yq7.github.io/shenlun-answer-sheet/?practice=1', '_blank', 'noopener');
+    };
+    const syncAnswerModeButton = () => {
+        const hidden = !isShenlunPage();
+        answerModeButton.hidden = hidden;
+        practicesButton.hidden = hidden;
+    };
+    panel.after(answerModeButton, practicesButton);
     syncAnswerModeButton();
     window.setInterval(syncAnswerModeButton, 500);
     answerModeButton.onclick = async () => {
@@ -4552,7 +4564,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.5';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.6';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
