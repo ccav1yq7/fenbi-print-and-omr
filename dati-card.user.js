@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.8.0
+// @version      0.8.5
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -51,7 +51,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.0';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.4';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -865,6 +865,42 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
             }
         });
     }
+
+    const answerModeButton = document.createElement('button');
+    answerModeButton.type = 'button';
+    answerModeButton.className = 'dati-launcher';
+    answerModeButton.style.top = '164px';
+    answerModeButton.textContent = '答题模式';
+    const isShenlunPage = () => new URL(location.href).searchParams.get('routecs') === 'shenlun'
+        && /^\/ti\/view\/paper(?:\/|$)/.test(location.pathname);
+    const syncAnswerModeButton = () => { answerModeButton.hidden = !isShenlunPage(); };
+    panel.after(answerModeButton);
+    syncAnswerModeButton();
+    window.setInterval(syncAnswerModeButton, 500);
+    answerModeButton.onclick = async () => {
+        if (!isShenlunPage() || answerModeButton.disabled) return;
+        const target = window.open('', '_blank');
+        if (!target) {
+            alert('浏览器拦截了答题页，请允许此站点打开新标签页后重试。');
+            return;
+        }
+        target.opener = null;
+        answerModeButton.disabled = true;
+        answerModeButton.textContent = '正在导入…';
+        showReservedLoading(target);
+        try {
+            const question = await extractAndBuild(false, '', 0, 0, 0, target, true);
+            const url = new URL('https://ccav1yq7.github.io/shenlun-answer-sheet/');
+            url.hash = new URLSearchParams({ 'fenbi-question': JSON.stringify(question) }).toString();
+            target.location.replace(url.href);
+        } catch (error) {
+            target.close();
+            alert(error.message || '导入题目失败，请重试。');
+        } finally {
+            answerModeButton.disabled = false;
+            answerModeButton.textContent = '答题模式';
+        }
+    };
 
     // ============ 购买卡密：弹窗支付 + 自动填卡密 ============
     const PAY_API_URL = "https://cloud1-8g137o5da8d5e269-1388442749.ap-shanghai.app.tcloudbase.com";
@@ -2118,7 +2154,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
             mark + '</div>';
     }
 
-    async function extractAndBuild(hasCover, coverTitle, pageMargin, fontSize, spacing, reservedWin) {
+    async function extractAndBuild(hasCover, coverTitle, pageMargin, fontSize, spacing, reservedWin, answerMode = false) {
         // 预览页通常处于前台，用它的计时器可避开 Edge 对后台原题页的定时器节流。
         const sleep = (ms) => new Promise(resolve => {
             const activeTimerHost = reservedWin && !reservedWin.closed && typeof reservedWin.setTimeout === 'function' ? reservedWin : window;
@@ -2154,6 +2190,63 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         const isShenlun = routeCourse === 'shenlun' || window.location.href.includes('shenlun');
         const isZhyynl = routeCourse === 'zhyynl';
         const isEssayLike = isShenlun || isZhyynl;
+        const shenlunSolutionSelector = (isShenlun ? [
+            'fb-ng-solution-choice', 'fb-ng-solution-blank', 'fb-ng-solution-essay', 'app-solution',
+            'app-result-common', 'app-solution-overall',
+            '.answer', '.analysis', '.solution', '[class*="answer-analysis"]',
+            '[class*="answer-content"]', '[class*="reference-answer"]', '[class*="analysis-content"]',
+            '[data-role*="answer"]', '[data-role*="solution"]'
+        ] : [
+            'fb-ng-solution-choice', 'fb-ng-solution-blank', 'fb-ng-solution-essay', 'app-solution',
+            'app-result-common', 'app-solution-overall',
+            '.answer', '.analysis', '.solution', '[class*="solution"]', '[class*="answer-analysis"]',
+            '[class*="answer-content"]', '[class*="reference-answer"]', '[class*="analysis-content"]',
+            '[data-role*="answer"]', '[data-role*="solution"]'
+        ]).join(',');
+        const findShenlunStemContainer = (question) => {
+            const selectors = [
+                ...[
+                    'app-solution-smart article.content',
+                    'app-solution-blank article.content',
+                    'app-solution-view-only article.content',
+                    'app-solution-special-filling-blank article.content',
+                    'app-solution-sketch article.content',
+                    'app-solution-keyword article.content',
+                    'app-solution-draw-line article.content',
+                    'app-solution-choice app-question-choice app-format-html'
+                ],
+                'fb-ng-question-essay app-format-html',
+                'fb-ng-question-blank app-format-html',
+                'fb-ng-question-choice app-format-html',
+                '.question-content app-format-html',
+                'article.content app-format-html',
+                'app-format-html',
+                'article.content'
+            ];
+            for (const selector of selectors) {
+                const match = Array.from(question.querySelectorAll(selector)).find(node => !node.closest(shenlunSolutionSelector));
+                if (match) return match;
+            }
+            return null;
+        };
+        const stripShenlunAnswerTail = (root) => {
+            if (!isEssayLike || !root) return;
+            root.querySelectorAll(shenlunSolutionSelector).forEach(node => node.remove());
+            const marker = /(?:参考答案(?:说明)?|答案解析|参考解析|标准答案|作答参考)\s*[：:]/;
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+                const textNode = walker.currentNode;
+                const match = (textNode.nodeValue || '').match(marker);
+                if (!match) continue;
+                const range = document.createRange();
+                range.setStart(textNode, match.index);
+                range.setEnd(root, root.childNodes.length);
+                range.deleteContents();
+                root.normalize();
+                break;
+            }
+        };
+
         let shenlunContinuous = isShenlun && !moduleNewPage;
         const localPracticeRoot = document.querySelector('#app-local-practice') || document.querySelector('app-local-practice');
         const isLocalPractice = !!localPracticeRoot;
@@ -2618,6 +2711,54 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
                 }
                 return tabs.length;
             };
+
+            if (answerMode) {
+                const question = getTi();
+                const stem = question && findShenlunStemContainer(question)?.cloneNode(true);
+                if (!stem) throw new Error('没有找到当前题干，请等题目加载后重试。');
+                stripShenlunAnswerTail(stem);
+                const toText = (root) => {
+                    root.querySelectorAll('p, div, li, br').forEach(node => node.after('\n'));
+                    return root.textContent.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+                };
+                const prompt = toText(stem).split(/\n\s*(?:解析视频|参考答案|答题演示|答案解析)(?:\s|[：:]|$)/)[0].trim();
+                if (!prompt) throw new Error('当前题干为空，请等题目加载后重试。');
+                const signature = qSignatureOf(question);
+                const sourceUrl = location.href;
+                const activeMaterial = getMatTabs().findIndex(tab => tab.classList.contains('active') || tab.getAttribute('aria-selected') === 'true');
+                const references = referencedMaterials(prompt);
+                try {
+                    if (getMatTabs().length) await collectVisibleMaterials(250);
+                    else getMatchedMaterials().forEach((material, index, all) => {
+                        const label = material.parentElement.querySelector('.label-tab');
+                        const number = all.length === 1 && references.size === 1 && !materialLabelPattern.test(label?.textContent ?? '')
+                            ? [...references][0] : materialNumberOf(label, index);
+                        materialMap.set(number, material.cloneNode(true));
+                    });
+                    if (location.href !== sourceUrl || qSignatureOf(getTi()) !== signature) {
+                        throw new Error('读取期间题目已切换，请重新点击答题模式。');
+                    }
+                } finally {
+                    if (location.href === sourceUrl && qSignatureOf(getTi()) === signature && activeMaterial >= 0) {
+                        const tab = getMatTabs()[activeMaterial];
+                        if (tab && !tab.classList.contains('active') && tab.getAttribute('aria-selected') !== 'true') click(tab);
+                    }
+                }
+                const sections = [...materialMap].sort(([a], [b]) => a - b).flatMap(([number, node]) => {
+                    const body = toText(node);
+                    return body ? [[number, body]] : [];
+                });
+                const missing = [...references].filter(number => !sections.some(([found]) => found === number));
+                if (missing.length || !sections.length) {
+                    throw new Error(missing.length ? '未读取到材料 ' + missing.join('、') + '，请等待材料加载后重试。' : '未读取到材料文字，请确认材料已加载。');
+                }
+                const number = question.querySelector('.title-index')?.textContent.match(/\d+/)?.[0];
+                return {
+                    prompt: number ? '第 ' + number + ' 题\n' + prompt : prompt,
+                    materials: sections.map(([id, body]) => '材料 ' + id + '\n' + body).join('\n\n'),
+                    capacity: essayWordLimit(prompt),
+                };
+            }
 
             await waitTabsStable(getQTabs);
             const qTabs = getQTabs();
@@ -3447,63 +3588,6 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
                 }
             });
         };
-        const shenlunSolutionSelector = (isShenlun ? [
-            'fb-ng-solution-choice', 'fb-ng-solution-blank', 'fb-ng-solution-essay', 'app-solution',
-            'app-result-common', 'app-solution-overall',
-            '.answer', '.analysis', '.solution', '[class*="answer-analysis"]',
-            '[class*="answer-content"]', '[class*="reference-answer"]', '[class*="analysis-content"]',
-            '[data-role*="answer"]', '[data-role*="solution"]'
-        ] : [
-            'fb-ng-solution-choice', 'fb-ng-solution-blank', 'fb-ng-solution-essay', 'app-solution',
-            'app-result-common', 'app-solution-overall',
-            '.answer', '.analysis', '.solution', '[class*="solution"]', '[class*="answer-analysis"]',
-            '[class*="answer-content"]', '[class*="reference-answer"]', '[class*="analysis-content"]',
-            '[data-role*="answer"]', '[data-role*="solution"]'
-        ]).join(',');
-        const findShenlunStemContainer = (question) => {
-            const selectors = [
-                ...[
-                    'app-solution-smart article.content',
-                    'app-solution-blank article.content',
-                    'app-solution-view-only article.content',
-                    'app-solution-special-filling-blank article.content',
-                    'app-solution-sketch article.content',
-                    'app-solution-keyword article.content',
-                    'app-solution-draw-line article.content',
-                    'app-solution-choice app-question-choice app-format-html'
-                ],
-                'fb-ng-question-essay app-format-html',
-                'fb-ng-question-blank app-format-html',
-                'fb-ng-question-choice app-format-html',
-                '.question-content app-format-html',
-                'article.content app-format-html',
-                'app-format-html',
-                'article.content'
-            ];
-            for (const selector of selectors) {
-                const match = Array.from(question.querySelectorAll(selector)).find(node => !node.closest(shenlunSolutionSelector));
-                if (match) return match;
-            }
-            return null;
-        };
-        const stripShenlunAnswerTail = (root) => {
-            if (!isEssayLike || !root) return;
-            root.querySelectorAll(shenlunSolutionSelector).forEach(node => node.remove());
-            const marker = /(?:参考答案(?:说明)?|答案解析|参考解析|标准答案|作答参考)\s*[：:]/;
-            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-            while (walker.nextNode()) {
-                const textNode = walker.currentNode;
-                const match = (textNode.nodeValue || '').match(marker);
-                if (!match) continue;
-                const range = document.createRange();
-                range.setStart(textNode, match.index);
-                range.setEnd(root, root.childNodes.length);
-                range.deleteContents();
-                root.normalize();
-                break;
-            }
-        };
-
         elements.forEach(el => {
             if (el.classList.contains('chapter-container')) {
                 materialIndex = 0;
@@ -4359,6 +4443,20 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     return option.matches(selector) || Boolean(option.querySelector(selector));
   }
 
+  // 2027国考极致模考6套卷，解析合集答案表。
+  const extremeMockSections = [
+    ['政治理论', 20], ['常识判断', 15], ['言语理解', 30],
+    ['数量关系', 10], ['判断推理', 35], ['资料分析', 20]
+  ];
+  const builtInAnswerSets = [
+    { title: '极致模考卷一', answers: 'CBDBDDCBADDCCBBCADDBDABBBAABDBCBCDAACBCCDAAACAABCBBDADBBDCACBDAADCBCAADBDBBDCCBDBCCADCABABDBACDDBACCACCBDBDCADDCABACBCDCCBAADDABCB' },
+    { title: '极致模考卷二', answers: 'DCCBBDDCDBCBDCACCDDDDCCCDDCDCBDCDCBDCBACDBCABABDCABCCCDDACCCBDADBADBCBCBCDBBCADBBBACDBBBADBCDABBCDABDCCAABCDAADBACDCBABCBCDADBDCAA' },
+    { title: '极致模考卷三', answers: 'BCDDBDDDADCBCBDACCDDBBDDCACAADDDCDCDCBCDABBDCBDBBCCBBAACACDDABACCBABDCBCBDACBDACCBBADCBDCADABCDDBCABBCCDADDCBDBBABDAABDCDBACDACDCB' },
+    { title: '极致模考卷四', answers: 'CAAABCBADAACDDDDDCCCBBDBBCCDBDCBCBADCACADBDBDCCBCABDDCAADAABBCCBBBBCADACDCAADCCBBCADCDBCBCCADCBCACBCADDBCDCACAABBDCCABBDBDCACCDDCA' },
+    { title: '极致模考卷五', answers: 'BABDACDCDCADCBDCABCBCCDADCAABDCBCBBBACACDDBDCABBADABACABADDACCACDBBCCABADAACDCADCACDBCBDBBCBDACADCBCADBCDACBBDCABBDDCABCDAACBBDCBD' },
+    { title: '极致模考卷六', answers: 'ABBAADBACDCBBCDDBCDDBDACCACDCDCDBDCBDCBCDCCABCCDCCBDABADBBABABCACDCBBDBACCDBDCABCBBADBDBCADCDABABACDACDBCDBDCAABCCDCDBABADDAACBBAD' }
+  ];
+
   function parseAnswerKey(input) {
     const text = input.normalize('NFKC').trim().toUpperCase();
     const compact = text.replace(/[\s,，、;；]+/g, '');
@@ -4388,8 +4486,24 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     });
   }
 
+  function buildGradeReport(graded, results, sections) {
+    const counts = { 正确: 0, 错误: 0, 未答: 0, 待核对: 0 };
+    const items = graded.map((entry, i) => {
+      counts[entry.state]++;
+      return { ...entry, number: i + 1, answer: results[i].answer || '' };
+    });
+    let offset = 0;
+    const modules = sections.map(([title, length]) => {
+      const questions = items.slice(offset, offset + length);
+      offset += length;
+      const correct = questions.filter(question => question.state === '正确').length;
+      return { title, questions, correct, rate: 100 * correct / length };
+    });
+    return { counts, modules, total: items.length, rate: 100 * counts['正确'] / items.length };
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { recognize, findCorners, collect, isSelected, fenbiExerciseRules, parseAnswerKey, gradeAnswers };
+    module.exports = { recognize, findCorners, collect, isSelected, fenbiExerciseRules, parseAnswerKey, gradeAnswers, builtInAnswerSets, buildGradeReport };
     return;
   }
 
@@ -4438,7 +4552,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.0';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.5';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
@@ -4554,7 +4668,38 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         .grid label:has(.answer-mark) { flex-wrap: wrap; }
         .answer-mark { flex-basis: 100%; font-size: 11px; }
         #local-grade { margin: 10px 0; }
-        #grade-results { white-space: pre-wrap; max-height: 18vh; overflow:auto; }
+        #grade-results { font-size: 12px; color: #334155; }
+        #report-dialog { width: min(720px, calc(100vw - 24px)); max-height: 88vh; box-sizing:border-box;
+          padding:0; border:1px solid #cad5df; border-radius:18px; background:#f2f6fa; color:#223548; }
+        #report-dialog::backdrop { background:#0f172a88; }
+        .report-header { position:sticky; top:0; z-index:1; display:flex; justify-content:space-between;
+          align-items:center; gap:12px; background:#26394b; color:white; padding:14px 18px; }
+        .report-header h2 { margin:0; font-size:16px; }
+        .report-body { display:grid; gap:12px; padding:14px; }
+        .report-card { border:1px solid #c5d3df; border-radius:12px; background:white; padding:12px; }
+        .report-overview { display:grid; grid-template-columns: minmax(130px, 1fr) 2fr; gap:10px; }
+        .report-score { padding:10px; background:#ffede1; border-radius:9px; color:#334155; }
+        .report-score strong { display:block; font:750 26px/1.25 system-ui,sans-serif; }
+        .report-counts { display:grid; grid-template-columns:repeat(2,1fr); gap:6px; }
+        .report-counts span { padding:6px 8px; border-radius:6px; background:#f1f5f9; }
+        .report-controls { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+        .report-controls button[aria-pressed="true"] { color:white; background:#26394b; }
+        .report-card h3 { margin:0 0 8px; font-size:14px; }
+        .report-metric { display:grid; grid-template-columns:5em 1fr 4em; align-items:center; gap:8px; margin:5px 0; }
+        .report-metric progress { width:100%; accent-color:#287555; }
+        .report-module-heading { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px;
+          padding-bottom:8px; margin-bottom:8px; border-bottom:1px dashed #c5d3df; }
+        .report-module > summary.report-module-heading { cursor:pointer; }
+        .report-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(56px,1fr)); gap:5px; }
+        .report-question { display:grid; justify-items:center; padding:5px; border-radius:6px; background:#eef2f7; }
+        .report-question[data-state="正确"], .report-options [data-correct] { background:#d8f3e5; color:#14593d; }
+        .report-question[data-state="错误"], .report-options [data-wrong] { background:#ffe3df; color:#a72f28; }
+        .report-question[data-state="待核对"] { background:#ffedbf; }
+        .report-rows { display:grid; gap:5px; }
+        .report-rows .report-question { grid-template-columns:2em 1fr; align-items:center; gap:6px; }
+        .report-options { display:grid; grid-template-columns:repeat(4,1fr); gap:4px; width:100%; }
+        .report-options span { text-align:center; padding:4px 2px; border-radius:4px; background:#fff9; }
+        .report-empty { margin:4px 0; color:#475569; }
         #count { width: 65px }
         textarea { width: 95%; min-height: 7em }
         footer { margin-top: 14px }
@@ -4564,11 +4709,30 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
       <section aria-label="涂卡录入">
         <label>使用方式 <select id="scan-mode"><option value="fenbi">粉笔录入</option><option value="local">本地对答案</option></select></label>
         <div id="local-grade" hidden>
-          <label>标准答案 <textarea id="answer-key" placeholder="粘贴 A B C D… 或 1.A 2.B 3.C…"></textarea></label>
-          <label>导入答案文件 <input id="answer-file" type="file" accept=".txt,.json,.csv,text/plain,application/json"></label>
-          <label id="answer-set-label" hidden>选择试卷 <select id="answer-set"></select></label>
-          <button id="grade-button" type="button" disabled>对答案</button>
+          <label>内置试卷 <select id="built-in-set"><option value="">选择极致模考卷号</option></select></label>
+          <details id="custom-answer"><summary>其他试卷</summary>
+            <label>标准答案 <textarea id="answer-key" placeholder="粘贴 A B C D… 或 1.A 2.B 3.C…"></textarea></label>
+            <label>导入答案文件 <input id="answer-file" type="file" accept=".txt,.json,.csv,text/plain,application/json"></label>
+            <label id="answer-set-label" hidden>选择试卷 <select id="answer-set"></select></label>
+          </details>
+          <button id="grade-button" type="button" disabled>对答案并算分</button>
           <p id="grade-results" role="status" hidden></p>
+          <button id="reopen-report" type="button" hidden>查看成绩报告</button>
+          <dialog id="report-dialog" aria-labelledby="report-title">
+            <header class="report-header"><h2 id="report-title">成绩报告</h2><button id="close-report" type="button">关闭</button></header>
+            <div class="report-body">
+              <div id="report-overview" class="report-card report-overview"></div>
+              <div id="report-metrics" class="report-card" hidden></div>
+              <div class="report-controls">
+                <button id="report-compact" type="button" aria-pressed="true">精简</button>
+                <button id="report-detail" type="button" aria-pressed="false">详细</button>
+                <label>筛选 <select id="report-filter">
+                  <option value="">全部题目</option><option>错误</option><option>未答</option><option>待核对</option>
+                </select></label>
+              </div>
+              <div id="report-modules" class="report-body" style="padding:0"></div>
+            </div>
+          </dialog>
         </div>
         <p class="controls"><label class="upload">答题卡图片 <input id="file" type="file" accept="image/*"></label>
           <button class="after-upload" id="align" disabled>标定答题区</button>
@@ -4599,8 +4763,10 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     get('rules').value = isFenbiExercise && savedRules === legacyRules ? defaultRules : savedRules;
     let base, results = [], corners = null, pending = null, busy = false;
     let generation = 0;
-    let graded = [];
     let answerSets = [];
+    const builtInSelect = get('built-in-set');
+    builtInAnswerSets.forEach((set, i) => builtInSelect.add(new Option(set.title, String(i))));
+    const selectedBuiltIn = () => builtInSelect.value === '' ? null : builtInAnswerSets[Number(builtInSelect.value)];
     get('scan-mode').value = isFenbiExercise ? 'fenbi' : 'local';
 
     function showMode() {
@@ -4612,8 +4778,9 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     }
 
     function clearGrade() {
-      graded = [];
       get('grade-results').hidden = true;
+      get('reopen-report').hidden = true;
+      if (get('report-dialog').open) get('report-dialog').close();
       for (const label of grid.children) {
         delete label.dataset.grade;
         label.querySelector('.answer-mark')?.remove();
@@ -4623,6 +4790,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     function useAnswerSet() {
       const set = answerSets[get('answer-set').selectedIndex];
       if (!set) return;
+      builtInSelect.value = '';
       get('answer-key').value = set.answers;
       get('count').value = parseAnswerKey(set.answers).length;
       clearGrade();
@@ -4630,7 +4798,19 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     }
 
     get('scan-mode').onchange = showMode;
-    get('answer-key').oninput = clearGrade;
+    builtInSelect.onchange = () => {
+      const set = selectedBuiltIn();
+      if (set) {
+        get('count').value = parseAnswerKey(set.answers).length;
+        get('custom-answer').open = false;
+      }
+      clearGrade();
+      if (results.length) render();
+    };
+    get('answer-key').oninput = () => {
+      builtInSelect.value = '';
+      clearGrade();
+    };
     get('answer-set').onchange = useAnswerSet;
     get('answer-file').onchange = async () => {
       const file = get('answer-file').files[0];
@@ -4651,27 +4831,121 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         status('答案文件读取失败。' + error.message);
       }
     };
+    let currentReport;
+    let detailedReport = false;
+    const reportDialog = get('report-dialog');
+    get('close-report').onclick = () => reportDialog.close();
+    get('reopen-report').onclick = () => reportDialog.showModal();
+
+    function reportElement(type, content, className) {
+      const element = document.createElement(type);
+      if (content) element.textContent = content;
+      if (className) element.className = className;
+      return element;
+    }
+
+    function renderReportQuestions() {
+      const filter = get('report-filter').value;
+      get('report-compact').setAttribute('aria-pressed', String(!detailedReport));
+      get('report-detail').setAttribute('aria-pressed', String(detailedReport));
+      const cards = currentReport.modules.map(module => {
+        const card = reportElement(detailedReport ? 'details' : 'section', '', 'report-card report-module');
+        const heading = reportElement(detailedReport ? 'summary' : 'div', '', 'report-module-heading');
+        heading.append(reportElement('strong', module.title),
+          reportElement('span', module.correct + ' / ' + module.questions.length + ' 题 · ' +
+            module.rate.toFixed(1) + '%'));
+        card.append(heading);
+        if (detailedReport) card.open = Boolean(filter) || module === currentReport.modules[0];
+        const list = reportElement('div', '', detailedReport ? 'report-rows' : 'report-cards');
+        for (const question of module.questions) {
+          if (filter && question.state !== filter) continue;
+          const item = reportElement('div', '', 'report-question');
+          item.dataset.state = question.state;
+          item.append(reportElement('strong', String(question.number)));
+          item.setAttribute('aria-label', '第 ' + question.number + ' 题，' + question.state +
+            '，作答 ' + (question.answer || '空白') + '，正确选项 ' + question.correct);
+          if (detailedReport) {
+            const options = reportElement('div', '', 'report-options');
+            for (const letter of letters) {
+              const option = reportElement('span', letter + (letter === question.correct ? ' ✓' :
+                letter === question.answer ? ' ×' : ''));
+              if (letter === question.correct) option.dataset.correct = '';
+              else if (letter === question.answer) option.dataset.wrong = '';
+              options.append(option);
+            }
+            item.append(options);
+          } else {
+            item.append(reportElement('span', question.state === '正确' ? question.answer + ' ✓' :
+              (question.answer || '—') + ' → ' + question.correct));
+          }
+          list.append(item);
+        }
+        card.append(list.childElementCount ? list : reportElement('p', '本组没有符合筛选的题目。', 'report-empty'));
+        return card;
+      });
+      get('report-modules').replaceChildren(...cards);
+    }
+
+    get('report-compact').onclick = () => { detailedReport = false; renderReportQuestions(); };
+    get('report-detail').onclick = () => { detailedReport = true; renderReportQuestions(); };
+    get('report-filter').onchange = renderReportQuestions;
+
+    function scoreText(rate) {
+      return rate.toFixed(Number.isInteger(rate) ? 0 : 1) + ' / 100 分';
+    }
+
+    function openGradeReport(report, title) {
+      currentReport = report;
+      get('report-title').textContent = title || '成绩报告';
+      const correct = report.counts['正确'];
+      const score = reportElement('div', '', 'report-score');
+      score.append(reportElement('small', (report.counts['待核对'] ? '暂计 · ' : '') + '得分（按正确率）'),
+        reportElement('strong', scoreText(report.rate)),
+        reportElement('span', '答对 ' + correct + ' / ' + report.total + ' 题 · 正确率 ' + report.rate.toFixed(1) + '%'));
+      const counts = reportElement('div', '', 'report-counts');
+      counts.append(...Object.entries(report.counts).map(([state, total]) => reportElement('span', state + ' ' + total)));
+      get('report-overview').replaceChildren(score, counts);
+      const metrics = get('report-metrics');
+      metrics.hidden = report.modules.length <= 1;
+      metrics.replaceChildren(reportElement('h3', '模块正确率'));
+      for (const module of report.modules) {
+        const metric = reportElement('div', '', 'report-metric');
+        const progress = reportElement('progress');
+        progress.max = 100;
+        progress.value = module.rate;
+        progress.setAttribute('aria-label', module.title + '正确率');
+        metric.append(reportElement('span', module.title), progress, reportElement('span', module.rate.toFixed(1) + '%'));
+        metrics.append(metric);
+      }
+      get('report-filter').value = '';
+      renderReportQuestions();
+      get('reopen-report').hidden = false;
+      if (!reportDialog.open) reportDialog.showModal();
+    }
+
     get('grade-button').onclick = () => {
       try {
-        const answers = parseAnswerKey(get('answer-key').value);
+        const set = selectedBuiltIn();
+        const value = set?.answers || get('answer-key').value;
+        if (!value.trim()) throw new Error('请先选择内置试卷，或在「其他试卷」填写标准答案。');
+        const answers = parseAnswerKey(value);
         if (answers.length !== count()) throw new Error('标准答案有 ' + answers.length + ' 题，试卷题量为 ' + count() + '。');
         clearGrade();
-        graded = gradeAnswers(results, answers);
-        const totals = Object.fromEntries(['正确', '错误', '未答', '待核对'].map(state =>
-          [state, graded.filter(item => item.state === state).length]));
-        const review = graded.flatMap(({ correct, state }, i) => state === '正确' ? [] :
-          [(i + 1) + ' ' + state + ' · 标准 ' + correct + ' · 作答 ' + (results[i].answer || '—')]);
+        const graded = gradeAnswers(results, answers);
+        const sections = set ? extremeMockSections : [['全部题目', answers.length]];
+        const report = buildGradeReport(graded, results, sections);
         const output = get('grade-results');
-        output.textContent = Object.entries(totals).map(([state, total]) => state + ' ' + total).join(' · ') +
-          ' / ' + answers.length + (review.length ? '\n' + review.join('\n') : '');
+        output.textContent = (report.counts['待核对'] ? '暂计得分 ' : '得分 ') + scoreText(report.rate) +
+          ' · 正确率 ' + report.rate.toFixed(1) + '%';
         output.hidden = false;
+        openGradeReport(report, set?.title);
         graded.forEach(({ correct, state }, i) => {
           const label = grid.children[i];
           label.dataset.grade = state;
           if (state === '正确') return;
           const mark = document.createElement('span');
           mark.className = 'answer-mark';
-          mark.textContent = '✓' + correct;
+          mark.textContent = '正确 ' + correct;
           label.append(mark);
         });
       } catch (error) { status(error.message); }
