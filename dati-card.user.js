@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.8.6
+// @version      0.8.7
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -51,7 +51,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.4';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.7';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -271,6 +271,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         </div>
         <div class="tm-count-line">${PAY_WALL ? '剩余打印次数：<span class="tm-count" id="tm-left-count">--</span> <span class="tm-pro-badge" id="tm-pro-badge" style="display:none;"></span>' : '<span class="tm-pro-badge pro">全功能免费开放</span>'}</div>
         <button id="tm-btn" class="tm-btn">提取试卷并打印</button>
+        <button type="button" id="dati-answer-mode" class="tm-link-btn" style="margin-top:8px" hidden>答题模式</button>
 
         ${PAY_WALL ? `<!-- 卡密（始终显示，不随高级设置折叠） -->
         <div class="tm-vip-box" style="margin-top:12px;">
@@ -872,7 +873,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     answerModeButton.style.top = '164px';
     answerModeButton.textContent = '答题模式';
     const isShenlunPage = () => new URL(location.href).searchParams.get('routecs') === 'shenlun'
-        && /^\/ti\/view\/paper(?:\/|$)/.test(location.pathname);
+        && /^\/ti\/(?:view\/paper|exam\/exercise)(?:\/|$)/.test(location.pathname);
     const practicesButton = document.createElement('button');
     practicesButton.type = 'button';
     practicesButton.className = 'dati-launcher';
@@ -881,9 +882,12 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     practicesButton.onclick = () => {
         window.open('https://ccav1yq7.github.io/shenlun-answer-sheet/?practice=1', '_blank', 'noopener');
     };
+    const answerModeInPanel = panel.querySelector('#dati-answer-mode');
+    answerModeInPanel.onclick = () => answerModeButton.click();
     const syncAnswerModeButton = () => {
         const hidden = !isShenlunPage();
         answerModeButton.hidden = hidden;
+        answerModeInPanel.hidden = hidden;
         practicesButton.hidden = hidden;
     };
     panel.after(answerModeButton, practicesButton);
@@ -898,7 +902,9 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         }
         target.opener = null;
         answerModeButton.disabled = true;
+        answerModeInPanel.disabled = true;
         answerModeButton.textContent = '正在导入…';
+        answerModeInPanel.textContent = '正在导入…';
         showReservedLoading(target);
         try {
             const question = await extractAndBuild(false, '', 0, 0, 0, target, true);
@@ -910,7 +916,9 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
             alert(error.message || '导入题目失败，请重试。');
         } finally {
             answerModeButton.disabled = false;
+            answerModeInPanel.disabled = false;
             answerModeButton.textContent = '答题模式';
+            answerModeInPanel.textContent = '答题模式';
         }
     };
 
@@ -2228,6 +2236,8 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
                     'app-solution-choice app-question-choice app-format-html'
                 ],
                 'fb-ng-question-essay app-format-html',
+                'app-question-essay article.content',
+                'app-question-essay app-format-html',
                 'fb-ng-question-blank app-format-html',
                 'fb-ng-question-choice app-format-html',
                 '.question-content app-format-html',
@@ -4564,7 +4574,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.6';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.7';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
