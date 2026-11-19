@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.8.8
+// @version      0.8.9
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -51,7 +51,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.8';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.9';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -4309,7 +4309,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     const blue = new Uint8Array(width * height);
     for (let i = 0; i < blue.length; i++) {
       const red = data[4 * i], green = data[4 * i + 1], value = data[4 * i + 2];
-      blue[i] = red < 145 && value - red > 24 && green - red > 7;
+      blue[i] = red < 175 && value - red > 22 && value - green > 12;
     }
 
     // Find long blue lines near the expected edges. Sweep slopes as well as
@@ -4345,10 +4345,10 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
       return { slope: best.slope, intercept: best.offset - best.slope * along / 2 };
     }
 
-    const top = findEdge(false, 0.24, 0.39, 0.16, 0.81);
-    const bottom = findEdge(false, 0.82, 0.99, 0.16, 0.81);
-    const left = findEdge(true, 0.01, 0.18, 0.4, 0.81);
-    const right = findEdge(true, 0.79, 0.98, 0.4, 0.81);
+    const top = findEdge(false, 0.20, 0.43, 0.16, 0.81);
+    const bottom = findEdge(false, 0.78, 0.99, 0.16, 0.81);
+    const left = findEdge(true, 0.005, 0.20, 0.4, 0.81);
+    const right = findEdge(true, 0.75, 0.99, 0.4, 0.81);
     if (!top || !bottom || !left || !right) return null;
 
     function intersect(horizontal, vertical) {
@@ -4388,22 +4388,37 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     const project = projection(corners);
     return rows.flatMap(y => columns.map(x => {
       const samples = Array.from(letters, (letter, option) => {
-        let ink = 0;
         const centerY = y + option * 30.7;
-        for (let dy = -5; dy <= 5; dy++) {
-          for (let dx = -10; dx <= 10; dx++) {
-            const [u, v] = project((x + dx - 107) / 1044, (centerY + dy - 582) / 1170);
-            const offset = 4 * (Math.round(v * (height - 1)) * width + Math.round(u * (width - 1)));
-            const red = data[offset], green = data[offset + 1], blue = data[offset + 2];
-            const gray = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-            // Discount blue printing while keeping neutral pencil strokes.
-            ink += Math.min(1, Math.max(0, (205 - gray - Math.max(0, blue - red) * 0.85) / 125));
+        let best = { score: 0, shiftX: 0, shiftY: 0 };
+        // Pencil marks may sit above/below the printed letter. Search only
+        // inside this option's row, never as far as the adjacent option.
+        for (const shiftY of [-8, -4, 0, 4, 8]) {
+          for (const shiftX of [-8, -4, 0, 4, 8]) {
+            let ink = 0;
+            for (let dy = -5; dy <= 5; dy++) {
+              for (let dx = -10; dx <= 10; dx++) {
+                const [u, v] = project((x + shiftX + dx - 107) / 1044,
+                  (centerY + shiftY + dy - 582) / 1170);
+                if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+                const offset = 4 * (Math.round(v * (height - 1)) * width + Math.round(u * (width - 1)));
+                const red = data[offset], green = data[offset + 1], blue = data[offset + 2];
+                const gray = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+                ink += Math.min(1, Math.max(0, (205 - gray - Math.max(0, blue - red) * 0.85) / 125));
+              }
+            }
+            const score = ink / 231;
+            if (score > best.score) best = { score, shiftX, shiftY };
           }
         }
-        return { letter, score: ink / 231, point: project((x - 107) / 1044, (centerY - 582) / 1170) };
+        return { letter, score: best.score,
+          point: project((x + best.shiftX - 107) / 1044, (centerY + best.shiftY - 582) / 1170) };
       });
       const [first, second] = [...samples].sort((a, b) => b.score - a.score);
-      if (first.score < 0.12) return { answer: '', state: '空白', samples };
+      // Local search also finds printed letters: weak, similar scores
+      // across options are blank printing rather than a pencil selection.
+      if (first.score < 0.12 || (first.score < 0.26 && first.score - second.score < 0.10)) {
+        return { answer: '', state: '空白', samples };
+      }
       if (first.score < 0.23 || second.score > Math.max(0.19, first.score * 0.61)) {
         return { answer: '', state: '待核对', samples };
       }
@@ -4574,7 +4589,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.8';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.9';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
