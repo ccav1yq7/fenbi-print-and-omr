@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.8.7
+// @version      0.8.8
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
@@ -51,7 +51,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.7';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.8';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -4574,7 +4574,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.7';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.8';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
@@ -5205,6 +5205,9 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   scanTab.onclick = openPanel;
   launcher.onclick = () => selectView(Boolean(host && !host.hidden));
   GM_registerMenuCommand('扫描答题卡', openPanel);
+  GM_registerMenuCommand('WebDAV 同步', () => {
+    GM_openInTab('https://ccav1yq7.github.io/shenlun-answer-sheet/?practice=1&webdav=1', { active: true });
+  });
   GM_registerMenuCommand('试卷打印', () => selectView(false));
 
   let previousPath;
