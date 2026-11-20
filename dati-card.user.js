@@ -1,21 +1,78 @@
 // ==UserScript==
 // @name         粉笔打印与涂卡助手
 // @namespace    dati-card-local
-// @version      0.8.9
+// @version      0.8.11
 // @description  粉笔试卷排版打印、行测答题卡识别与批量录入
 // @author       打印模块：Gdz
 // @updateURL    https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
 // @downloadURL  https://raw.githubusercontent.com/ccav1yq7/fenbi-print-and-omr/main/dati-card.user.js
 // @connect      raw.githubusercontent.com
+// @connect      dav.jianguoyun.com
+// @match        https://ccav1yq7.github.io/shenlun-answer-sheet/*
 // @match        https://www.fenbi.com/*
 // @match        https://spa.fenbi.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @noframes
 // ==/UserScript==
+
+// 答题卡页只启用联动功能，粉笔工具面板在原站单独加载。
+if (typeof location !== 'undefined' && location.origin === 'https://ccav1yq7.github.io' && location.pathname.startsWith('/shenlun-answer-sheet/')) {
+    if (typeof GM_xmlhttpRequest === 'function' && !document.documentElement.dataset.fenbiAssistant) {
+        document.documentElement.dataset.fenbiAssistant = '1';
+        document.addEventListener('shenlun:assistant-request', (event) => {
+            let message;
+            try { message = JSON.parse(event.detail); } catch (_) { return; }
+            if (!message || typeof message.id !== 'string') return;
+            const respond = (data) => document.dispatchEvent(new CustomEvent('shenlun:assistant-response', {
+                detail: JSON.stringify({ id: message.id, ...data }),
+            }));
+            if (message.action === 'return-answer') {
+                const { link, answer, submit } = message;
+                if (!/^[a-f0-9-]{36}$/.test(link) || typeof answer !== 'string' || !answer.trim() || answer.length > 30000) {
+                    return respond({ error: '答题来源或作答内容无效。' });
+                }
+                const source = GM_getValue('shenlun-source-' + link, null);
+                if (!source || source.expires < Date.now()) return respond({ error: '联动已过期，请从粉笔重新打开答题模式。' });
+                const url = new URL(source.url);
+                if (url.origin !== 'https://spa.fenbi.com' || !/^\/ti\/exam\/exercise\//.test(url.pathname)
+                    || url.searchParams.get('routecs') !== 'shenlun') return respond({ error: '请从粉笔的申论作答页开启答题模式。' });
+                const delivery = crypto.randomUUID();
+                GM_setValue('shenlun-return-' + delivery, { ...source, answer, submit: submit === true, expires: Math.min(source.expires, Date.now() + 120000) });
+                url.hash = new URLSearchParams({ 'shenlun-return': delivery }).toString();
+                GM_openInTab(url.href, { active: true });
+                return respond({});
+            }
+            if (message.action !== 'webdav') return;
+            let url;
+            try { url = new URL(message.url); } catch (_) { return respond({ error: 'WebDAV 地址无效。' }); }
+            const revision = /^shenlun-sync-[0-9a-f-]{36}-(root|[0-9a-f]{64})-[0-9a-f]{64}\.json$/;
+            const filename = url.pathname.split('/').pop();
+            const method = message.method;
+            const allowed = method === 'PROPFIND' ? !filename : ['GET', 'PUT'].includes(method) && revision.test(filename);
+            if (url.origin !== 'https://dav.jianguoyun.com' || !url.pathname.startsWith('/dav/')
+                || url.username || url.password || url.search || url.hash || !allowed) {
+                return respond({ error: '粉笔助手仅代理坚果云练习记录的 WebDAV 请求。' });
+            }
+            const headers = {};
+            for (const name of ['Authorization', 'Depth', 'Content-Type', 'If-None-Match']) {
+                if (typeof message.headers?.[name] === 'string') headers[name] = message.headers[name];
+            }
+            GM_xmlhttpRequest({
+                method, url: url.href, headers, data: message.body,
+                anonymous: true, redirect: 'error', timeout: 15000,
+                onload: (result) => respond({ status: result.status, text: result.responseText }),
+                onerror: () => respond({ error: '无法连接坚果云，请检查网络和脚本的跨域访问权限。' }),
+                ontimeout: () => respond({ error: '坚果云访问超时。' }),
+                onabort: () => respond({ error: '坚果云请求已取消。' }),
+            });
+        });
+    }
+} else {
 
 // 打印模块来自 Gdz 的粉笔题库整理 v70.78。
 if (typeof document !== "undefined") {
@@ -51,7 +108,7 @@ var qrcode=function(){var t=function(t,r){var e=t,n=g[r],o=null,i=0,a=null,u=[],
     }
 
     // 插件版本号：优先从油猴(GM_info)自动读取，书签等环境回退到默认值
-const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.9';
+const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '0.8.11';
 
     // ===== 付费墙总开关 =====
     // false = 推广期：全功能免费开放，免卡密免验证（不调后端、不扣次数），全参数可调
@@ -909,6 +966,16 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
         try {
             const question = await extractAndBuild(false, '', 0, 0, 0, target, true);
             const url = new URL('https://ccav1yq7.github.io/shenlun-answer-sheet/');
+            if (location.origin === 'https://spa.fenbi.com' && /^\/ti\/exam\/exercise\//.test(location.pathname)) {
+                const link = crypto.randomUUID();
+                const source = new URL(location.href);
+                source.hash = '';
+                GM_setValue('shenlun-source-' + link, {
+                    url: source.href, signature: question.sourceSignature, expires: Date.now() + 7 * 86400000,
+                });
+                question.assistantLink = link;
+            }
+            delete question.sourceSignature;
             url.hash = new URLSearchParams({ 'fenbi-question': JSON.stringify(question) }).toString();
             target.location.replace(url.href);
         } catch (error) {
@@ -921,6 +988,75 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
             answerModeInPanel.textContent = '答题模式';
         }
     };
+
+    const delivery = new URLSearchParams(location.hash.slice(1)).get('shenlun-return');
+    if (delivery && /^[a-f0-9-]{36}$/.test(delivery)) {
+        const key = 'shenlun-return-' + delivery;
+        const pending = GM_getValue(key, null);
+        const currentUrl = new URL(location.href);
+        currentUrl.hash = '';
+        if (pending?.url === currentUrl.href && pending.expires > Date.now()) {
+            history.replaceState(history.state, '', currentUrl.href);
+            const fill = () => {
+                const question = document.querySelector('.questions-objective-container app-ti') || document.querySelector('app-ti');
+                if (!question) return false;
+                const id = question.getAttribute('data-question-key');
+                const index = question.querySelector('.title-index');
+                const identity = id ? 'k:' + id : index ? 'i:' + index.innerText.trim() : 'content';
+                const signature = identity + '|' + (question.innerText || question.textContent || '').replace(/\s+/g, '').slice(0, 500);
+                if (signature !== pending.signature) return false;
+                const editors = Array.from(document.querySelectorAll('textarea')).filter((input) =>
+                    input.getClientRects().length && !input.disabled && !input.readOnly
+                    && (question.contains(input) || /答案|作答/.test(input.placeholder)));
+                if (editors.length !== 1) return false;
+                const editor = editors[0];
+                if (editor.maxLength >= 0 && pending.answer.length > editor.maxLength) {
+                    GM_deleteValue(key);
+                    alert('作答超过粉笔输入框字数上限，已保留答题卡原稿。');
+                    return true;
+                }
+                GM_deleteValue(key);
+                if (editor.value.trim() && editor.value !== pending.answer
+                    && !confirm('粉笔输入框已有内容。要用答题卡的答案替换吗？')) return true;
+                Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(editor, pending.answer);
+                editor.dispatchEvent(new Event('input', { bubbles: true }));
+                editor.dispatchEvent(new Event('change', { bubbles: true }));
+                editor.focus();
+                editor.scrollIntoView({ block: 'center' });
+                if (pending.submit) {
+                    // 等待站点处理 input 事件后，再查找本题专属批改入口。
+                    setTimeout(() => {
+                        const title = document.querySelector('.header-title, .paper-name, .header-center .title');
+                        const singleCorrection = /单题批改/.test(title?.textContent ?? '');
+                        const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter((button) => {
+                            const label = (button.innerText || '').trim();
+                            return button.getClientRects().length && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+                                && ((/^(?:提交批改|提交并批改)$/.test(label) && (question.contains(button) || singleCorrection))
+                                    || (label === '交卷' && singleCorrection));
+                        });
+                        if (location.href === currentUrl.href && editor.isConnected && editor.value === pending.answer
+                            && buttons.length === 1) {
+                            buttons[0].click();
+                            return;
+                        }
+                        alert('答案已填入。请用粉笔页面的交卷或批改按钮完成提交。');
+                    }, 350);
+                } else {
+                    alert('已填入当前题目的答案，请检查后点击粉笔的交卷或提交批改。');
+                }
+                return true;
+            };
+            let attempts = 0;
+            const timer = setInterval(() => {
+                if (fill()) clearInterval(timer);
+                else if (++attempts >= 24) {
+                    clearInterval(timer);
+                    GM_deleteValue(key);
+                    alert('未能确认题目或定位答题框，请从粉笔原题重新打开答题模式。');
+                }
+            }, 500);
+        }
+    }
 
     // ============ 购买卡密：弹窗支付 + 自动填卡密 ============
     const PAY_API_URL = "https://cloud1-8g137o5da8d5e269-1388442749.ap-shanghai.app.tcloudbase.com";
@@ -2779,6 +2915,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
                     prompt: number ? '第 ' + number + ' 题\n' + prompt : prompt,
                     materials: sections.map(([id, body]) => '材料 ' + id + '\n' + body).join('\n\n'),
                     capacity: essayWordLimit(prompt),
+                    sourceSignature: signature,
                 };
             }
 
@@ -4309,7 +4446,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
     const blue = new Uint8Array(width * height);
     for (let i = 0; i < blue.length; i++) {
       const red = data[4 * i], green = data[4 * i + 1], value = data[4 * i + 2];
-      blue[i] = red < 175 && value - red > 22 && value - green > 12;
+      blue[i] = red < 175 && value - red > 10 && value - green > 7;
     }
 
     // Find long blue lines near the expected edges. Sweep slopes as well as
@@ -4589,7 +4726,7 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   const updateStatus = assistantSettings.querySelector('#dati-update-status');
   updateLink.href = releaseUrl;
   updateButton.onclick = () => {
-    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.9';
+    const installed = typeof GM_info !== 'undefined' ? GM_info.script.version : '0.8.11';
     updateButton.disabled = true;
     updateLink.hidden = true;
     updateStatus.textContent = '正在检查 GitHub…';
@@ -5243,3 +5380,5 @@ const PLUGIN_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.scr
   // Angular can change the route without reloading the userscript.
   setInterval(syncExercisePanel, 500);
 })();
+
+} // 粉笔站内功能
